@@ -3,7 +3,6 @@ syntax = "proto3";
 package envoy.extensions.filters.http.cache_custom.v3;
 
 import "udpa/annotations/status.proto";
-import "udpa/annotations/versioning.proto";
 import "xds/annotations/v3/status.proto";
 import "validate/validate.proto";
 
