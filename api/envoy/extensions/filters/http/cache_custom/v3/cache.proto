@@ -15,14 +15,13 @@ option (udpa.annotations.file_status).package_version_status = ACTIVE;
 // [#extension: envoy.filters.http.cache_custom]
 
 // Configuration for the ring buffer cache filter.
-// [#next-free-field: 4]
 message CacheCustom {
   // Maximum number of entries in the cache.
   uint32 max_entries = 1 [(validate.rules).uint32 = {gt: 0}];
 
   // TTL for cached entries in seconds.
   uint32 ttl_seconds = 2 [(validate.rules).uint32 = {gt: 0}];
-  
+
   // Maximum size of each cached response in bytes.
   uint32 max_response_size_bytes = 3 [(validate.rules).uint32 = {gt: 0}];
 }
