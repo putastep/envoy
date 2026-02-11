@@ -10,6 +10,7 @@
 
 #include "source/common/common/logger.h"
 #include "source/extensions/filters/http/common/pass_through_filter.h"
+#include "source/common/http/header_map_impl.h"
 
 #include "envoy/extensions/filters/http/cache_custom/v3/cache.pb.h"
 
@@ -27,12 +28,10 @@ public:
       const envoy::extensions::filters::http::cache_custom::v3::CacheCustom& config);
 
   uint32_t maxEntries() const { return max_entries_; }
-  uint32_t ttlSeconds() const { return ttl_seconds_; }
   uint32_t maxResponseSizeBytes() const { return max_response_size_bytes_; }
 
 private:
   const uint32_t max_entries_;
-  const uint32_t ttl_seconds_;
   const uint32_t max_response_size_bytes_;
 };
 
@@ -44,7 +43,7 @@ using CacheCustomConfigSharedPtr = std::shared_ptr<CacheCustomConfig>;
 struct CacheEntry {
   std::string response_body;
   Http::Code status_code;
-  Http::ResponseHeaderMapPtr headers;
+  std::shared_ptr<Http::ResponseHeaderMap> headers;
   std::chrono::steady_clock::time_point expiry_time;
 };
 
@@ -53,7 +52,7 @@ struct CacheEntry {
  */
 class RingBufferCache : public Logger::Loggable<Logger::Id::filter> {
 public:
-  RingBufferCache(uint32_t max_entries, uint32_t ttl_seconds, uint32_t max_response_size);
+  RingBufferCache(uint32_t max_entries, uint32_t max_response_size);
 
   // Get cached response for a given key
   absl::optional<CacheEntry> get(const std::string& key);
@@ -63,7 +62,6 @@ public:
 
 private:
   const uint32_t max_entries_;
-  const uint32_t ttl_seconds_;
   const uint32_t max_response_size_;
   
   std::unordered_map<std::string, CacheEntry> cache_;

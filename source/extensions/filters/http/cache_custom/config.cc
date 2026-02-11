@@ -14,7 +14,6 @@ Http::FilterFactoryCb CacheCustomFilterFactory::createFilterFactoryFromProtoType
   auto config = std::make_shared<CacheCustomConfig>(proto_config);
   auto cache = std::make_shared<RingBufferCache>(
       proto_config.max_entries(),
-      proto_config.ttl_seconds(),
       proto_config.max_response_size_bytes());
 
   return [config, cache](Http::FilterChainFactoryCallbacks& callbacks) -> void {

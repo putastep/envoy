@@ -10,13 +10,11 @@ namespace CacheCustom {
 CacheCustomConfig::CacheCustomConfig(
     const envoy::extensions::filters::http::cache_custom::v3::CacheCustom& config)
     : max_entries_(config.max_entries()),
-      ttl_seconds_(config.ttl_seconds()),
       max_response_size_bytes_(config.max_response_size_bytes()) {}
 
-RingBufferCache::RingBufferCache(uint32_t max_entries, uint32_t ttl_seconds,
+RingBufferCache::RingBufferCache(uint32_t max_entries,
                                  uint32_t max_response_size)
-    : max_entries_(max_entries), ttl_seconds_(ttl_seconds),
-      max_response_size_(max_response_size) {}
+    : max_entries_(max_entries), max_response_size_(max_response_size) {}
 
 absl::optional<CacheEntry> RingBufferCache::get(const std::string& key) {
   auto it = cache_.find(key);
@@ -24,15 +22,8 @@ absl::optional<CacheEntry> RingBufferCache::get(const std::string& key) {
     return absl::nullopt;
   }
 
-  // Check if entry has expired
-  auto now = std::chrono::steady_clock::now();
-  if (now > it->second.expiry_time) {
-    cache_.erase(it);
-    return absl::nullopt;
-  }
-
   ENVOY_LOG(debug, "Cache hit for key: {}", key);
-  return it->second;
+  return {it->second};
 }
 
 void RingBufferCache::put(const std::string& key, CacheEntry entry) {
@@ -62,15 +53,14 @@ CacheCustomFilter::CacheCustomFilter(CacheCustomConfigSharedPtr config,
                                      RingBufferCacheSharedPtr cache)
     : config_(std::move(config)), cache_(std::move(cache)) {}
 
-Http::FilterHeadersStatus CacheCustomFilter::decodeHeaders(Http::RequestHeaderMap& headers,
-                                                           bool end_stream) {
+Http::FilterHeadersStatus CacheCustomFilter::decodeHeaders(Http::RequestHeaderMap& headers, bool) {
   // Only cache GET requests
   if (headers.getMethodValue() != "GET") {
     return Http::FilterHeadersStatus::Continue;
   }
 
   cache_key_ = generateCacheKey(headers);
-  
+
   // Try to get from cache
   auto cached_entry = cache_->get(cache_key_);
   if (cached_entry.has_value()) {
@@ -109,8 +99,6 @@ Http::FilterHeadersStatus CacheCustomFilter::encodeHeaders(Http::ResponseHeaderM
     entry.response_body = response_body_;
     entry.status_code = status_code_;
     entry.headers = std::move(response_headers_);
-    entry.expiry_time = std::chrono::steady_clock::now() +
-                        std::chrono::seconds(config_->ttlSeconds());
     cache_->put(cache_key_, std::move(entry));
     should_cache_ = false;
   }
@@ -132,8 +120,6 @@ Http::FilterDataStatus CacheCustomFilter::encodeData(Buffer::Instance& data, boo
     entry.response_body = response_body_;
     entry.status_code = status_code_;
     entry.headers = std::move(response_headers_);
-    entry.expiry_time = std::chrono::steady_clock::now() +
-                        std::chrono::seconds(config_->ttlSeconds());
     cache_->put(cache_key_, std::move(entry));
     should_cache_ = false;
   }
@@ -142,7 +128,7 @@ Http::FilterDataStatus CacheCustomFilter::encodeData(Buffer::Instance& data, boo
 }
 
 std::string CacheCustomFilter::generateCacheKey(const Http::RequestHeaderMap& headers) {
-  // Simple cache key: method + path + host
+  // Cache key: method + path + host
   std::string key;
   key.append(std::string(headers.getMethodValue()));
   key.append(":");
@@ -157,9 +143,8 @@ std::string CacheCustomFilter::generateCacheKey(const Http::RequestHeaderMap& he
 void CacheCustomFilter::sendCachedResponse(const CacheEntry& entry) {
   // Send cached headers
   decoder_callbacks_->encodeHeaders(
-      Http::createHeaderMap<Http::ResponseHeaderMapImpl>(*entry.headers), 
-      entry.response_body.empty(), 
-      "cache_custom");
+      Http::createHeaderMap<Http::ResponseHeaderMapImpl>(*entry.headers),
+      entry.response_body.empty(), "cache_custom");
 
   // Send cached body if present
   if (!entry.response_body.empty()) {
