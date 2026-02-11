@@ -9,11 +9,26 @@ licenses(["notice"])  # Apache 2
 
 envoy_extension_package()
 
+envoy_cc_library(
+    name = "cache_filter_lib",
+    srcs = ["cache_filter.cc"],
+    hdrs = ["cache_filter.h"],
+    deps = [
+        "//envoy/http:filter_interface",
+        "//envoy/server:filter_config_interface",
+        "//source/common/common:logger_lib",
+        "//source/common/http:utility_lib",
+        "//source/extensions/filters/http/common:pass_through_filter_lib",
+        "@envoy_api//envoy/extensions/filters/http/cache_custom/v3:pkg_cc_proto",
+    ],
+)
+
 envoy_cc_extension(
     name = "config",
     srcs = ["config.cc"],
     hdrs = ["config.h"],
     deps = [
+        ":cache_filter_lib",
         "//source/extensions/filters/http/common:factory_base_lib",
         "@envoy_api//envoy/extensions/filters/http/cache_custom/v3:pkg_cc_proto",
     ],

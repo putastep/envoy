@@ -1,58 +1,31 @@
-#include "config.h"
-#include "filter.h"
-#include "filter_config.h"
+#include "source/extensions/filters/http/cache_custom/config.h"
+
+#include "source/extensions/filters/http/cache_custom/cache_filter.h"
 
 namespace Envoy {
 namespace Extensions {
 namespace HttpFilters {
-namespace RingBufferCache {
+namespace CacheCustom {
 
-Http::FilterFactoryCb RingBufferCacheFilterFactory::createFilterFactoryFromProtoTyped(
-    const envoy::extensions::filters::http::cache_custom::v3::RingBufferCache& proto_config,
-    const std::string& stats_prefix,
-    Server::Configuration::FactoryContext& context) {
+Http::FilterFactoryCb CacheCustomFilterFactory::createFilterFactoryFromProtoTyped(
+    const envoy::extensions::filters::http::cache_custom::v3::CacheCustom& proto_config,
+    const std::string&, Server::Configuration::FactoryContext&) {
   
-  // Create shared filter configuration (one per filter chain)
-  FilterConfigSharedPtr config = std::make_shared<FilterConfig>(
-      proto_config, context.scope());
-  
-  // Return lambda that creates filter instances
-  return [config](Http::FilterChainFactoryCallbacks& callbacks) -> void {
-    // Each request gets its own filter instance
-    callbacks.addStreamFilter(std::make_shared<RingBufferCacheFilter>(config));
+  auto config = std::make_shared<CacheCustomConfig>(proto_config);
+  auto cache = std::make_shared<RingBufferCache>(
+      proto_config.max_entries(),
+      proto_config.ttl_seconds(),
+      proto_config.max_response_size_bytes());
+
+  return [config, cache](Http::FilterChainFactoryCallbacks& callbacks) -> void {
+    callbacks.addStreamFilter(std::make_shared<CacheCustomFilter>(config, cache));
   };
 }
 
-Http::FilterFactoryCb 
-RingBufferCacheFilterFactory::createFilterFactoryFromProtoWithServerContextTyped(
-    const envoy::extensions::filters::http::cache_custom::v3::RingBufferCache& proto_config,
-    const std::string& stats_prefix,
-    Server::Configuration::ServerFactoryContext& context) {
-  
-  FilterConfigSharedPtr config = std::make_shared<FilterConfig>(
-      proto_config, context.scope());
-  
-  return [config](Http::FilterChainFactoryCallbacks& callbacks) -> void {
-    callbacks.addStreamFilter(std::make_shared<RingBufferCacheFilter>(config));
-  };
-}
-
-absl::StatusOr<Router::RouteSpecificFilterConfigConstSharedPtr>
-RingBufferCacheFilterFactory::createRouteSpecificFilterConfigTyped(
-    const envoy::extensions::filters::http::cache_custom::v3::RingBufferCachePerRoute& proto_config,
-    Server::Configuration::ServerFactoryContext& context,
-    ProtobufMessage::ValidationVisitor& validator) {
-  
-  return std::make_shared<FilterConfigPerRoute>(proto_config);
-}
-
-/**
- * Static registration for the ring buffer cache filter.
- */
-REGISTER_FACTORY(RingBufferCacheFilterFactory,
+REGISTER_FACTORY(CacheCustomFilterFactory,
                  Server::Configuration::NamedHttpFilterConfigFactory);
 
-} // namespace RingBufferCache
+} // namespace CacheCustom
 } // namespace HttpFilters
 } // namespace Extensions
 } // namespace Envoy
