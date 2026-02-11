@@ -126,6 +126,7 @@ proto_library(
         "//envoy/extensions/filters/http/basic_auth/v3:pkg",
         "//envoy/extensions/filters/http/buffer/v3:pkg",
         "//envoy/extensions/filters/http/cache/v3:pkg",
+        "//envoy/extensions/filters/http/cache_custom/v3:pkg",
         "//envoy/extensions/filters/http/cache_v2/v3:pkg",
         "//envoy/extensions/filters/http/cdn_loop/v3:pkg",
         "//envoy/extensions/filters/http/composite/v3:pkg",
