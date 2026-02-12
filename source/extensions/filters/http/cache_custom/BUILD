@@ -11,8 +11,17 @@ envoy_extension_package()
 
 envoy_cc_library(
     name = "cache_filter_lib",
-    srcs = ["cache_filter.cc"],
-    hdrs = ["cache_filter.h"],
+    srcs = [
+        "cache_filter.cc",
+        "cache_config.cc",
+        "cache_manager.cc",
+    ],
+    hdrs = [
+        "cache_filter.h",
+        "cache_config.h",
+        "cache_manager.h",
+        "common.h",
+    ],
     deps = [
         "//envoy/http:filter_interface",
         "//envoy/server:filter_config_interface",
