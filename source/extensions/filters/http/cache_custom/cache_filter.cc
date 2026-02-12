@@ -9,16 +9,20 @@ namespace CacheCustom {
 
 CacheCustomConfig::CacheCustomConfig(
     const envoy::extensions::filters::http::cache_custom::v3::CacheCustom& config)
-    : max_entries_(config.max_entries()),
-      max_response_size_bytes_(config.max_response_size_bytes()) {}
+    : max_entries_per_host_(config.max_entries_per_host()),
+      max_entry_size_(config.max_entry_size_bytes()) {}
 
-RingBufferCache::RingBufferCache(uint32_t max_entries,
-                                 uint32_t max_response_size)
-    : max_entries_(max_entries), max_response_size_(max_response_size) {}
+RingBufferCache::RingBufferCache(uint32_t max_entries, uint32_t max_entry_size)
+    : max_entries_per_host_(max_entries), max_entry_size_(max_entry_size) {}
 
-absl::optional<CacheEntry> RingBufferCache::get(const std::string& key) {
-  auto it = cache_.find(key);
-  if (it == cache_.end()) {
+absl::optional<CacheEntry> RingBufferCache::get(const std::string& host, const std::string& key) {
+  auto host_cache = host_caches_.find(host);
+  if (host_cache == host_caches_.end()) {
+    return absl::nullopt;
+  }
+
+  auto it = host_cache->second.cache.find(key);
+  if (it == host_cache->second.cache.end()) {
     return absl::nullopt;
   }
 
@@ -26,26 +30,68 @@ absl::optional<CacheEntry> RingBufferCache::get(const std::string& key) {
   return {it->second};
 }
 
-void RingBufferCache::put(const std::string& key, CacheEntry entry) {
+bool RingBufferCache::isInFlight(const std::string& host, const std::string& key) {
+  auto host_cache = host_caches_.find(host);
+  if (host_cache == host_caches_.end()) {
+    return false;
+  }
+
+  return host_cache->second.in_flight_requests.find(key) !=
+         host_cache->second.in_flight_requests.end();
+}
+
+void RingBufferCache::markInFlight(const std::string& host, const std::string& key) {
+  host_caches_[host].in_flight_requests.insert(key);
+
+  ENVOY_LOG(debug, "Marked request as in-flight: {}", key);
+}
+
+void RingBufferCache::notifyCompletion(const std::string& host, const std::string& key) {
+  auto host_cache = host_caches_.find(host);
+  if (host_cache == host_caches_.end()) {
+    return;
+  }
+
+  host_cache->second.in_flight_requests.erase(key);
+
+  // Notify all waiting requests for this key
+  auto it = host_cache->second.waiting_requests.find(key);
+  if (it != host_cache->second.waiting_requests.end()) {
+    ENVOY_LOG(debug, "Notifying {} waiting requests for key: {}", it->second.size(), key);
+    for (auto& callback : it->second) {
+      callback();
+    }
+    host_cache->second.waiting_requests.erase(it);
+  }
+}
+
+void RingBufferCache::addWaitingRequest(const std::string& host, const std::string& key,
+                                        std::function<void()> callback) {
+  host_caches_[host].waiting_requests[key].push_back(std::move(callback));
+  ENVOY_LOG(debug, "Added waiting request for key: {}", key);
+}
+
+void RingBufferCache::put(const std::string& host, const std::string& key, CacheEntry entry) {
   // Check if response size exceeds limit
-  if (entry.response_body.size() > max_response_size_) {
+  if (entry.response_body.size() > max_entry_size_) {
     ENVOY_LOG(debug, "Response too large to cache: {} bytes", entry.response_body.size());
     return;
   }
 
   // If cache is full, remove oldest entry
-  if (cache_.size() >= max_entries_ && cache_.find(key) == cache_.end()) {
-    if (!ring_buffer_.empty()) {
-      std::string oldest_key = ring_buffer_.front();
-      ring_buffer_.pop_front();
-      cache_.erase(oldest_key);
+  if (host_caches_[host].cache.size() >= max_entries_per_host_ &&
+      host_caches_[host].cache.find(key) == host_caches_[host].cache.end()) {
+    if (!host_caches_[host].ring_buffer.empty()) {
+      std::string oldest_key = host_caches_[host].ring_buffer.front();
+      host_caches_[host].ring_buffer.pop_front();
+      host_caches_[host].cache.erase(oldest_key);
       ENVOY_LOG(debug, "Evicted oldest entry: {}", oldest_key);
     }
   }
 
   // Add/update entry
-  cache_[key] = std::move(entry);
-  ring_buffer_.push_back(key);
+  host_caches_[host].cache[key] = std::move(entry);
+  host_caches_[host].ring_buffer.push_back(key);
   ENVOY_LOG(debug, "Cached response for key: {}", key);
 }
 
@@ -59,17 +105,44 @@ Http::FilterHeadersStatus CacheCustomFilter::decodeHeaders(Http::RequestHeaderMa
     return Http::FilterHeadersStatus::Continue;
   }
 
+  host_ = extractHost(headers);
   cache_key_ = generateCacheKey(headers);
 
   // Try to get from cache
-  auto cached_entry = cache_->get(cache_key_);
+  auto cached_entry = cache_->get(host_, cache_key_);
   if (cached_entry.has_value()) {
     ENVOY_LOG(debug, "Serving response from cache for: {}", cache_key_);
     sendCachedResponse(cached_entry.value());
     return Http::FilterHeadersStatus::StopIteration;
   }
 
+  // Check if request is already in-flight (request coalescing)
+  if (cache_->isInFlight(host_, cache_key_)) {
+    ENVOY_LOG(debug, "Request coalescing: waiting for in-flight request: {}", cache_key_);
+    is_coalesced_ = true;
+
+    // Add this request to waiting queue
+    cache_->addWaitingRequest(host_, cache_key_, [this]() {
+      // When the in-flight request completes, serve from cache
+      auto cached_entry = cache_->get(host_, cache_key_);
+      if (cached_entry.has_value()) {
+        ENVOY_LOG(debug, "Serving coalesced response from cache for: {}", cache_key_);
+        sendCachedResponse(cached_entry.value());
+      } else {
+        ENVOY_LOG(warn, "Coalesced request completed but cache miss for: {}", cache_key_);
+        // Let the request continue to backend as fallback
+        decoder_callbacks_->continueDecoding();
+      }
+    });
+
+    return Http::FilterHeadersStatus::StopIteration;
+  }
+
+  // Mark this request as in-flight for coalescing
+  cache_->markInFlight(host_, cache_key_);
   should_cache_ = true;
+  is_origin_request_ = true;
+
   return Http::FilterHeadersStatus::Continue;
 }
 
@@ -87,6 +160,10 @@ Http::FilterHeadersStatus CacheCustomFilter::encodeHeaders(Http::ResponseHeaderM
   const auto status = Http::Utility::getResponseStatus(headers);
   if (status != 200) {
     should_cache_ = false;
+    // Notify waiting requests that the original request failed
+    if (is_origin_request_) {
+      cache_->notifyCompletion(host_, cache_key_);
+    }
     return Http::FilterHeadersStatus::Continue;
   }
 
@@ -94,13 +171,7 @@ Http::FilterHeadersStatus CacheCustomFilter::encodeHeaders(Http::ResponseHeaderM
   response_headers_ = Http::createHeaderMap<Http::ResponseHeaderMapImpl>(headers);
 
   if (end_stream) {
-    // Cache immediately if no body
-    CacheEntry entry;
-    entry.response_body = response_body_;
-    entry.status_code = status_code_;
-    entry.headers = std::move(response_headers_);
-    cache_->put(cache_key_, std::move(entry));
-    should_cache_ = false;
+    cacheResponse();
   }
 
   return Http::FilterHeadersStatus::Continue;
@@ -115,33 +186,45 @@ Http::FilterDataStatus CacheCustomFilter::encodeData(Buffer::Instance& data, boo
   response_body_.append(data.toString());
 
   if (end_stream) {
-    // Cache the complete response
-    CacheEntry entry;
-    entry.response_body = response_body_;
-    entry.status_code = status_code_;
-    entry.headers = std::move(response_headers_);
-    cache_->put(cache_key_, std::move(entry));
-    should_cache_ = false;
+    cacheResponse();
   }
 
   return Http::FilterDataStatus::Continue;
 }
 
-std::string CacheCustomFilter::generateCacheKey(const Http::RequestHeaderMap& headers) {
-  // Cache key: method + path + host
-  std::string key;
-  key.append(std::string(headers.getMethodValue()));
-  key.append(":");
-  key.append(std::string(headers.getPathValue()));
-  if (headers.Host() != nullptr) {
-    key.append(":");
-    key.append(std::string(headers.getHostValue()));
+void CacheCustomFilter::cacheResponse() {
+  CacheEntry entry;
+  entry.response_body = response_body_;
+  entry.status_code = status_code_;
+  entry.headers = std::move(response_headers_);
+  cache_->put(host_, cache_key_, std::move(entry));
+  should_cache_ = false;
+
+  // Notify waiting coalesced requests
+  if (is_origin_request_) {
+    cache_->notifyCompletion(host_, cache_key_);
   }
+}
+
+// Cache key: path
+std::string CacheCustomFilter::generateCacheKey(const Http::RequestHeaderMap& headers) {
+  std::string key;
+
+  key.append(std::string(headers.getPathValue()));
+
   return key;
 }
 
+std::string CacheCustomFilter::extractHost(const Http::RequestHeaderMap& headers) {
+  std::string key;
+
+  key.append(std::string(headers.getHostValue()));
+
+  return key;
+}
+
+// Send cached headers
 void CacheCustomFilter::sendCachedResponse(const CacheEntry& entry) {
-  // Send cached headers
   decoder_callbacks_->encodeHeaders(
       Http::createHeaderMap<Http::ResponseHeaderMapImpl>(*entry.headers),
       entry.response_body.empty(), "cache_custom");

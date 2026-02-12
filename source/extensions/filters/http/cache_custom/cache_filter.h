@@ -4,6 +4,9 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
+#include <vector>
+#include <functional>
 
 #include "envoy/http/filter.h"
 #include "envoy/server/filter_config.h"
@@ -24,15 +27,14 @@ namespace CacheCustom {
  */
 class CacheCustomConfig {
 public:
-  CacheCustomConfig(
-      const envoy::extensions::filters::http::cache_custom::v3::CacheCustom& config);
+  CacheCustomConfig(const envoy::extensions::filters::http::cache_custom::v3::CacheCustom& config);
 
-  uint32_t maxEntries() const { return max_entries_; }
-  uint32_t maxResponseSizeBytes() const { return max_response_size_bytes_; }
+  uint32_t maxEntriesPerHost() const { return max_entries_per_host_; }
+  uint32_t maxEntrySizeBytes() const { return max_entry_size_; }
 
 private:
-  const uint32_t max_entries_;
-  const uint32_t max_response_size_bytes_;
+  const uint32_t max_entries_per_host_;
+  const uint32_t max_entry_size_;
 };
 
 using CacheCustomConfigSharedPtr = std::shared_ptr<CacheCustomConfig>;
@@ -48,30 +50,45 @@ struct CacheEntry {
 };
 
 /**
- * Ring buffer cache implementation.
+ * Ring buffer cache implementation with request coalescing support.
  */
 class RingBufferCache : public Logger::Loggable<Logger::Id::filter> {
 public:
-  RingBufferCache(uint32_t max_entries, uint32_t max_response_size);
+  RingBufferCache(uint32_t max_entries_per_host, uint32_t max_entry_size);
 
   // Get cached response for a given key
-  absl::optional<CacheEntry> get(const std::string& key);
+  absl::optional<CacheEntry> get(const std::string& host, const std::string& key);
 
   // Put a response into the cache
-  void put(const std::string& key, CacheEntry entry);
+  void put(const std::string& host, const std::string& key, CacheEntry entry);
+
+  // Request coalescing methods
+  bool isInFlight(const std::string& host, const std::string& key);
+  void markInFlight(const std::string& host, const std::string& key);
+  void notifyCompletion(const std::string& host, const std::string& key);
+  void addWaitingRequest(const std::string& host, const std::string& key,
+                         std::function<void()> callback);
 
 private:
-  const uint32_t max_entries_;
-  const uint32_t max_response_size_;
-  
-  std::unordered_map<std::string, CacheEntry> cache_;
-  std::deque<std::string> ring_buffer_;
+  // Per-host cache
+  struct HostCache {
+    std::unordered_map<std::string, CacheEntry> cache;
+    std::deque<std::string> ring_buffer;
+    std::unordered_set<std::string> in_flight_requests;
+    std::unordered_map<std::string, std::vector<std::function<void()>>> waiting_requests;
+  };
+
+  const uint32_t max_entries_per_host_;
+  const uint32_t max_entry_size_;
+
+  // Map from host to its cache state
+  std::unordered_map<std::string, HostCache> host_caches_;
 };
 
 using RingBufferCacheSharedPtr = std::shared_ptr<RingBufferCache>;
 
 /**
- * HTTP filter for ring buffer cache.
+ * HTTP filter for ring buffer cache with request coalescing.
  */
 class CacheCustomFilter : public Http::PassThroughFilter,
                           public Logger::Loggable<Logger::Id::filter> {
@@ -88,18 +105,31 @@ public:
                                           bool end_stream) override;
   Http::FilterDataStatus encodeData(Buffer::Instance& data, bool end_stream) override;
 
+  // Http::StreamFilterBase
+  void onDestroy() override {
+    // Clean up in-flight tracking
+    if (is_origin_request_ && should_cache_) {
+      cache_->notifyCompletion(host_, cache_key_);
+    }
+  }
+
 private:
+  std::string extractHost(const Http::RequestHeaderMap& headers);
   std::string generateCacheKey(const Http::RequestHeaderMap& headers);
   void sendCachedResponse(const CacheEntry& entry);
+  void cacheResponse();
 
   CacheCustomConfigSharedPtr config_;
   RingBufferCacheSharedPtr cache_;
-  
+
+  std::string host_;
   std::string cache_key_;
   std::string response_body_;
   Http::Code status_code_{Http::Code::OK};
   Http::ResponseHeaderMapPtr response_headers_;
   bool should_cache_{false};
+  bool is_origin_request_{false}; // True if this is the first request (not coalesced)
+  bool is_coalesced_{false};      // True if this request is waiting for another
 };
 
 } // namespace CacheCustom
