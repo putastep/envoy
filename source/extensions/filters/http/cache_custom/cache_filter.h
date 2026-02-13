@@ -15,6 +15,9 @@ class CacheCustomFilter : public Http::PassThroughFilter,
 public:
   CacheCustomFilter(CacheConfigSharedPtr config, CacheManagerSharedPtr cache_manager);
 
+  void receiveBroadcastHeaders(Http::ResponseHeaderMapPtr headers, bool end_stream);
+  void receiveBroadcastData(std::shared_ptr<Buffer::Instance> data, bool end_stream);
+
   // Http::StreamDecoderFilter
   Http::FilterHeadersStatus decodeHeaders(Http::RequestHeaderMap& headers,
                                           bool end_stream) override;
@@ -50,6 +53,10 @@ private:
   bool has_cached_response_{false};
   Http::ResponseHeaderMapPtr cached_response_headers_;
   Buffer::OwnedImpl cached_response_body_;
+
+  // For recieving broadcasted data
+  std::queue<BroadcastMessage> pending_broadcasts_;
+  bool decode_complete_{false};
 };
 
 } // namespace CacheCustom

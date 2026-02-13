@@ -34,7 +34,7 @@ Http::FilterHeadersStatus CacheCustomFilter::decodeHeaders(Http::RequestHeaderMa
   if (cache_manager_->isInFlight(host_, cache_key_)) {
     is_follower_ = true;
 
-    cache_manager_->registerFollower(host_, cache_key_, decoder_callbacks_);
+    cache_manager_->registerFollower(host_, cache_key_, this);
 
     ENVOY_LOG(debug, "Request coalescing: becoming follower for key: {}", cache_key_);
     return Http::FilterHeadersStatus::StopIteration;
@@ -98,11 +98,67 @@ std::string CacheCustomFilter::extractHost(const Http::RequestHeaderMap& headers
   return std::string(headers.getHostValue());
 }
 
+void CacheCustomFilter::receiveBroadcastHeaders(Http::ResponseHeaderMapPtr headers,
+                                                bool end_stream) {
+  decoder_callbacks_->dispatcher().post([this, headers = std::move(headers), end_stream]() mutable {
+    if (!decode_complete_) {
+
+      BroadcastMessage msg;
+      msg.type = BroadcastMessage::Type::Headers;
+      msg.headers = std::move(headers); // Move the headers into the message
+      msg.end_stream = end_stream;
+
+      pending_broadcasts_.push(std::move(msg));
+    } else {
+      // Decoding is done, can send now
+      decoder_callbacks_->encodeHeaders(std::move(headers), end_stream, "cache_hit");
+    }
+  });
+}
+
+void CacheCustomFilter::receiveBroadcastData(std::shared_ptr<Buffer::Instance> data,
+                                             bool end_stream) {
+  decoder_callbacks_->dispatcher().post([this, data, end_stream]() mutable {
+    if (!decode_complete_) {
+
+      // Create the message
+      BroadcastMessage msg;
+      msg.type = BroadcastMessage::Type::Data;
+      msg.data = data; // Store the shared_ptr
+      msg.end_stream = end_stream;
+
+      // Queue it
+      pending_broadcasts_.push(std::move(msg));
+    } else {
+      // Decoding is done, can send now
+      decoder_callbacks_->encodeData(*data, end_stream);
+    }
+  });
+}
+
 void CacheCustomFilter::decodeComplete() {
+  decode_complete_ = true;
+
   if (has_cached_response_) {
     decoder_callbacks_->encodeHeaders(std::move(cached_response_headers_), false, "cache_hit");
     decoder_callbacks_->encodeData(cached_response_body_, true);
     has_cached_response_ = false;
+  }
+
+  while (!pending_broadcasts_.empty()) {
+    // Get reference to front message
+    BroadcastMessage& msg = pending_broadcasts_.front();
+
+    // Process based on type
+    if (msg.type == BroadcastMessage::Type::Headers) {
+      decoder_callbacks_->encodeHeaders(std::move(msg.headers), msg.end_stream,
+                                        "cache_custom_coalesced");
+    } else { // Type::Data
+      decoder_callbacks_->encodeData(*msg.data, msg.end_stream);
+    }
+
+    // Remove from queue
+    pending_broadcasts_.pop();
   }
 }
 
@@ -123,7 +179,7 @@ void CacheCustomFilter::cacheResponse() {
 
 void CacheCustomFilter::onDestroy() {
   if (is_follower_) {
-    cache_manager_->unregisterFollower(host_, cache_key_, decoder_callbacks_);
+    cache_manager_->unregisterFollower(host_, cache_key_, this);
   }
 }
 

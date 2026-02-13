@@ -22,8 +22,17 @@ struct CacheEntry {
 
 struct InFlightRequestState {
   CacheCustomFilter* leader_filter;
-  std::vector<Http::StreamDecoderFilterCallbacks*> followers;
+  std::vector<CacheCustomFilter*> followers;
   uint32_t high_watermark_count = 0;
+};
+
+struct BroadcastMessage {
+  enum class Type { Headers, Data };
+
+  Type type;
+  Http::ResponseHeaderMapPtr headers;     // For headers messages
+  std::shared_ptr<Buffer::Instance> data; // For data messages
+  bool end_stream;
 };
 
 } // namespace CacheCustom

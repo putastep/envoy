@@ -1,5 +1,6 @@
 #include "cache_manager.h"
 #include "cache_filter.h"
+#include <utility>
 
 namespace Envoy {
 namespace Extensions {
@@ -77,11 +78,11 @@ void CacheManager::registerLeader(const std::string& host, const std::string& ke
 }
 
 void CacheManager::registerFollower(const std::string& host, const std::string& key,
-                                    Http::StreamDecoderFilterCallbacks* follower_callbacks) {
+                                    CacheCustomFilter* follower_filter) {
   Thread::LockGuard lock(mutex_);
 
   auto& state = host_caches_[host].in_flight_requests[key];
-  state.followers.push_back(follower_callbacks);
+  state.followers.push_back(follower_filter);
 
   ENVOY_LOG(debug, "Registered follower for key: {}", key);
 }
@@ -89,7 +90,7 @@ void CacheManager::registerFollower(const std::string& host, const std::string& 
 void CacheManager::broadcastHeaders(const std::string& host, const std::string& key,
                                     Http::ResponseHeaderMap& headers, bool end_stream) {
   // Create a copy of the followers list while holding the lock
-  std::vector<Http::StreamDecoderFilterCallbacks*> followers_copy;
+  std::vector<CacheCustomFilter*> followers_copy;
   {
     Thread::LockGuard lock(mutex_);
 
@@ -106,25 +107,18 @@ void CacheManager::broadcastHeaders(const std::string& host, const std::string& 
     followers_copy = state_it->second.followers;
   }
 
-  // Broadcast to followers without holding the lock
-  for (auto* follower_callbacks : followers_copy) {
+  // Broadcast to followers
+  for (auto* follower : followers_copy) {
     // Create header map for each follower
     auto headers_copy = Http::createHeaderMap<Http::ResponseHeaderMapImpl>(headers);
-
-    follower_callbacks->dispatcher().post(
-        [follower_callbacks, headers_copy = std::move(headers_copy), end_stream]() mutable {
-          if (follower_callbacks) {
-            follower_callbacks->encodeHeaders(std::move(headers_copy), end_stream,
-                                              "cache_custom_coalesced");
-          }
-        });
+    follower->receiveBroadcastHeaders(std::move(headers_copy), end_stream);
   }
 }
 
 void CacheManager::broadcastData(const std::string& host, const std::string& key,
                                  Buffer::Instance& data, bool end_stream) {
   // Create a copy of the followers list while holding the lock
-  std::vector<Http::StreamDecoderFilterCallbacks*> followers_copy;
+  std::vector<CacheCustomFilter*> followers_copy;
   {
     Thread::LockGuard lock(mutex_);
 
@@ -142,19 +136,15 @@ void CacheManager::broadcastData(const std::string& host, const std::string& key
   }
 
   // Broadcast to followers without holding the lock
-  for (auto* follower_callbacks : followers_copy) {
+  for (auto* follower : followers_copy) {
     auto data_copy = std::make_shared<Buffer::OwnedImpl>(data);
 
-    follower_callbacks->dispatcher().post([follower_callbacks, data_copy, end_stream]() {
-      if (follower_callbacks) {
-        follower_callbacks->encodeData(*data_copy, end_stream);
-      }
-    });
+    follower->receiveBroadcastData(data_copy, end_stream);
   }
 }
 
 void CacheManager::unregisterFollower(const std::string& host, const std::string& key,
-                                      Http::StreamDecoderFilterCallbacks* decoder_callbacks) {
+                                      CacheCustomFilter* follower_filter) {
   Thread::LockGuard lock(mutex_);
 
   auto host_it = host_caches_.find(host);
@@ -168,7 +158,7 @@ void CacheManager::unregisterFollower(const std::string& host, const std::string
   }
 
   auto& followers = state_it->second.followers;
-  auto it = std::find(followers.begin(), followers.end(), decoder_callbacks);
+  auto it = std::find(followers.begin(), followers.end(), follower_filter);
   if (it != followers.end()) {
     followers.erase(it);
     ENVOY_LOG(debug, "Unregistered follower for key: {}", key);

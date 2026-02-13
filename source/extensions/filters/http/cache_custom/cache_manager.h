@@ -24,7 +24,7 @@ public:
   void registerLeader(const std::string& host, const std::string& key,
                       CacheCustomFilter* leader_filter);
   void registerFollower(const std::string& host, const std::string& key,
-                        Http::StreamDecoderFilterCallbacks* follower_callbacks);
+                        CacheCustomFilter* follower_filter);
 
   void broadcastData(const std::string& host, const std::string& key, Buffer::Instance& data,
                      bool end_stream);
@@ -32,7 +32,7 @@ public:
                         Http::ResponseHeaderMap& headers, bool end_stream);
 
   void unregisterFollower(const std::string& host, const std::string& key,
-                          Http::StreamDecoderFilterCallbacks* follower_callbacks);
+                          CacheCustomFilter* follower_filter);
   void notifyCompletion(const std::string& host, const std::string& key);
   void updateWatermark(const std::string& host, const std::string& key, bool high_watermark);
 
