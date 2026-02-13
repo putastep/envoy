@@ -22,13 +22,19 @@ Http::FilterHeadersStatus CacheCustomFilter::decodeHeaders(Http::RequestHeaderMa
   // 1. Cache Hit
   auto cached_entry = cache_manager_->get(host_, cache_key_);
   if (cached_entry.has_value()) {
-    sendCachedResponse(cached_entry.value());
+    cached_response_headers_ =
+        Http::createHeaderMap<Http::ResponseHeaderMapImpl>(*cached_entry->headers);
+    cached_response_body_.add(cached_entry->response_body);
+    has_cached_response_ = true;
+
     return Http::FilterHeadersStatus::StopIteration;
   }
 
   // 2. Request Coalescing
   if (cache_manager_->isInFlight(host_, cache_key_)) {
     is_follower_ = true;
+
+    cache_manager_->registerFollower(host_, cache_key_, decoder_callbacks_);
 
     ENVOY_LOG(debug, "Request coalescing: becoming follower for key: {}", cache_key_);
     return Http::FilterHeadersStatus::StopIteration;
@@ -43,8 +49,7 @@ Http::FilterHeadersStatus CacheCustomFilter::decodeHeaders(Http::RequestHeaderMa
 }
 
 Http::FilterDataStatus CacheCustomFilter::decodeData(Buffer::Instance&, bool) {
-  return back_pressure_ ? Http::FilterDataStatus::StopIterationAndBuffer
-                        : Http::FilterDataStatus::Continue;
+  return Http::FilterDataStatus::Continue;
 }
 
 Http::FilterHeadersStatus CacheCustomFilter::encodeHeaders(Http::ResponseHeaderMap& headers,
@@ -85,27 +90,6 @@ Http::FilterDataStatus CacheCustomFilter::encodeData(Buffer::Instance& data, boo
   return Http::FilterDataStatus::Continue;
 }
 
-void CacheCustomFilter::onAboveWriteBufferHighWatermark() {
-  if (is_follower_) {
-    cache_manager_->updateWatermark(host_, cache_key_, true);
-  }
-}
-
-void CacheCustomFilter::onBelowWriteBufferLowWatermark() {
-  if (is_follower_) {
-    cache_manager_->updateWatermark(host_, cache_key_, false);
-  }
-}
-
-void CacheCustomFilter::setBackpressure(bool back_pressure) {
-  if (is_leader_ && decoder_callbacks_) {
-    back_pressure_ = back_pressure;
-    if (!back_pressure) {
-      decoder_callbacks_->continueDecoding();
-    }
-  }
-}
-
 std::string CacheCustomFilter::generateCacheKey(const Http::RequestHeaderMap& headers) {
   return std::string(headers.getPathValue());
 }
@@ -114,16 +98,11 @@ std::string CacheCustomFilter::extractHost(const Http::RequestHeaderMap& headers
   return std::string(headers.getHostValue());
 }
 
-void CacheCustomFilter::sendCachedResponse(const CacheEntry& entry) {
-  // Send headers
-  auto headers_copy = Http::createHeaderMap<Http::ResponseHeaderMapImpl>(*entry.headers);
-  decoder_callbacks_->encodeHeaders(std::move(headers_copy), entry.response_body.empty(),
-                                    "cache_custom");
-
-  // Send body if present
-  if (!entry.response_body.empty()) {
-    Buffer::OwnedImpl buffer(entry.response_body);
-    decoder_callbacks_->encodeData(buffer, true);
+void CacheCustomFilter::decodeComplete() {
+  if (has_cached_response_) {
+    decoder_callbacks_->encodeHeaders(std::move(cached_response_headers_), false, "cache_hit");
+    decoder_callbacks_->encodeData(cached_response_body_, true);
+    has_cached_response_ = false;
   }
 }
 
@@ -140,6 +119,12 @@ void CacheCustomFilter::cacheResponse() {
 
   cache_manager_->put(host_, cache_key_, std::move(entry));
   cache_manager_->notifyCompletion(host_, cache_key_);
+}
+
+void CacheCustomFilter::onDestroy() {
+  if (is_follower_) {
+    cache_manager_->unregisterFollower(host_, cache_key_, decoder_callbacks_);
+  }
 }
 
 } // namespace CacheCustom

@@ -10,6 +10,8 @@ CacheManager::CacheManager(uint32_t max_entries_per_host, uint32_t max_entry_siz
     : max_entries_per_host_(max_entries_per_host), max_entry_size_(max_entry_size) {}
 
 absl::optional<CacheEntry> CacheManager::get(const std::string& host, const std::string& key) {
+  Thread::LockGuard lock(mutex_);
+
   auto host_cache = host_caches_.find(host);
   if (host_cache == host_caches_.end()) {
     return absl::nullopt;
@@ -31,6 +33,8 @@ void CacheManager::put(const std::string& host, const std::string& key, CacheEnt
     return;
   }
 
+  Thread::LockGuard lock(mutex_);
+
   auto& host_cache = host_caches_[host];
 
   // If cache is full and this is a new entry, evict oldest
@@ -51,6 +55,8 @@ void CacheManager::put(const std::string& host, const std::string& key, CacheEnt
 }
 
 bool CacheManager::isInFlight(const std::string& host, const std::string& key) {
+  Thread::LockGuard lock(mutex_);
+
   auto host_cache = host_caches_.find(host);
   if (host_cache == host_caches_.end()) {
     return false;
@@ -62,6 +68,8 @@ bool CacheManager::isInFlight(const std::string& host, const std::string& key) {
 
 void CacheManager::registerLeader(const std::string& host, const std::string& key,
                                   CacheCustomFilter* leader_filter) {
+  Thread::LockGuard lock(mutex_);
+
   auto& state = host_caches_[host].in_flight_requests[key];
   state.leader_filter = leader_filter;
   state.high_watermark_count = 0;
@@ -70,8 +78,9 @@ void CacheManager::registerLeader(const std::string& host, const std::string& ke
 
 void CacheManager::registerFollower(const std::string& host, const std::string& key,
                                     Http::StreamDecoderFilterCallbacks* follower_callbacks) {
-  auto& state = host_caches_[host].in_flight_requests[key];
+  Thread::LockGuard lock(mutex_);
 
+  auto& state = host_caches_[host].in_flight_requests[key];
   state.followers.push_back(follower_callbacks);
 
   ENVOY_LOG(debug, "Registered follower for key: {}", key);
@@ -79,55 +88,75 @@ void CacheManager::registerFollower(const std::string& host, const std::string& 
 
 void CacheManager::broadcastHeaders(const std::string& host, const std::string& key,
                                     Http::ResponseHeaderMap& headers, bool end_stream) {
-  auto host_it = host_caches_.find(host);
-  if (host_it == host_caches_.end()) {
-    return;
+  // Create a copy of the followers list while holding the lock
+  std::vector<Http::StreamDecoderFilterCallbacks*> followers_copy;
+  {
+    Thread::LockGuard lock(mutex_);
+
+    auto host_it = host_caches_.find(host);
+    if (host_it == host_caches_.end()) {
+      return;
+    }
+
+    auto state_it = host_it->second.in_flight_requests.find(key);
+    if (state_it == host_it->second.in_flight_requests.end()) {
+      return;
+    }
+
+    followers_copy = state_it->second.followers;
   }
 
-  auto state_it = host_it->second.in_flight_requests.find(key);
-  if (state_it == host_it->second.in_flight_requests.end()) {
-    return;
-  }
-
-  auto& state = state_it->second;
-
-  for (auto* follower_callbacks : state.followers) {
+  // Broadcast to followers without holding the lock
+  for (auto* follower_callbacks : followers_copy) {
     // Create header map for each follower
     auto headers_copy = Http::createHeaderMap<Http::ResponseHeaderMapImpl>(headers);
 
     follower_callbacks->dispatcher().post(
         [follower_callbacks, headers_copy = std::move(headers_copy), end_stream]() mutable {
-          follower_callbacks->encodeHeaders(std::move(headers_copy), end_stream,
-                                            "cache_custom_coalesced");
+          if (follower_callbacks) {
+            follower_callbacks->encodeHeaders(std::move(headers_copy), end_stream,
+                                              "cache_custom_coalesced");
+          }
         });
   }
 }
 
 void CacheManager::broadcastData(const std::string& host, const std::string& key,
                                  Buffer::Instance& data, bool end_stream) {
-  auto host_it = host_caches_.find(host);
-  if (host_it == host_caches_.end()) {
-    return;
+  // Create a copy of the followers list while holding the lock
+  std::vector<Http::StreamDecoderFilterCallbacks*> followers_copy;
+  {
+    Thread::LockGuard lock(mutex_);
+
+    auto host_it = host_caches_.find(host);
+    if (host_it == host_caches_.end()) {
+      return;
+    }
+
+    auto state_it = host_it->second.in_flight_requests.find(key);
+    if (state_it == host_it->second.in_flight_requests.end()) {
+      return;
+    }
+
+    followers_copy = state_it->second.followers;
   }
 
-  auto state_it = host_it->second.in_flight_requests.find(key);
-  if (state_it == host_it->second.in_flight_requests.end()) {
-    return;
-  }
-
-  auto& state = state_it->second;
-
-  for (auto* follower_callbacks : state.followers) {
+  // Broadcast to followers without holding the lock
+  for (auto* follower_callbacks : followers_copy) {
     auto data_copy = std::make_shared<Buffer::OwnedImpl>(data);
 
     follower_callbacks->dispatcher().post([follower_callbacks, data_copy, end_stream]() {
-      follower_callbacks->encodeData(*data_copy, end_stream);
+      if (follower_callbacks) {
+        follower_callbacks->encodeData(*data_copy, end_stream);
+      }
     });
   }
 }
 
 void CacheManager::unregisterFollower(const std::string& host, const std::string& key,
                                       Http::StreamDecoderFilterCallbacks* decoder_callbacks) {
+  Thread::LockGuard lock(mutex_);
+
   auto host_it = host_caches_.find(host);
   if (host_it == host_caches_.end()) {
     return;
@@ -147,6 +176,8 @@ void CacheManager::unregisterFollower(const std::string& host, const std::string
 }
 
 void CacheManager::notifyCompletion(const std::string& host, const std::string& key) {
+  Thread::LockGuard lock(mutex_);
+
   auto host_it = host_caches_.find(host);
   if (host_it == host_caches_.end()) {
     return;
@@ -154,37 +185,6 @@ void CacheManager::notifyCompletion(const std::string& host, const std::string& 
 
   host_it->second.in_flight_requests.erase(key);
   ENVOY_LOG(debug, "Request completed for key: {}", key);
-}
-
-void CacheManager::updateWatermark(const std::string& host, const std::string& key,
-                                   bool high_watermark) {
-  auto host_it = host_caches_.find(host);
-  if (host_it == host_caches_.end()) {
-    return;
-  }
-
-  auto state_it = host_it->second.in_flight_requests.find(key);
-  if (state_it == host_it->second.in_flight_requests.end()) {
-    return;
-  }
-
-  auto& state = state_it->second;
-
-  if (high_watermark) {
-    state.high_watermark_count++;
-  } else if (state.high_watermark_count > 0) {
-    state.high_watermark_count--;
-  }
-
-  if (state.leader_filter != nullptr) {
-    if (state.high_watermark_count > 0) {
-      // Leader should stop producing more data
-      state.leader_filter->setBackpressure(true);
-    } else {
-      // Leader should resume decoding
-      state.leader_filter->setBackpressure(false);
-    }
-  }
 }
 
 } // namespace CacheCustom

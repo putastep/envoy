@@ -6,6 +6,8 @@
 #include "source/common/buffer/buffer_impl.h"
 #include "common.h"
 
+#include "envoy/thread/thread.h"
+
 namespace Envoy {
 namespace Extensions {
 namespace HttpFilters {
@@ -30,7 +32,7 @@ public:
                         Http::ResponseHeaderMap& headers, bool end_stream);
 
   void unregisterFollower(const std::string& host, const std::string& key,
-                          Http::StreamDecoderFilterCallbacks* decoder_callbacks);
+                          Http::StreamDecoderFilterCallbacks* follower_callbacks);
   void notifyCompletion(const std::string& host, const std::string& key);
   void updateWatermark(const std::string& host, const std::string& key, bool high_watermark);
 
@@ -44,6 +46,9 @@ private:
   const uint32_t max_entries_per_host_;
   const uint32_t max_entry_size_;
   std::unordered_map<std::string, HostCacheState> host_caches_;
+
+  // Mutex to protect all shared state
+  mutable Thread::MutexBasicLockable mutex_;
 };
 
 using CacheManagerSharedPtr = std::shared_ptr<CacheManager>;

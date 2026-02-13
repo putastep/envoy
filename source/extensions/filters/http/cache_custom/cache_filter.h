@@ -11,7 +11,6 @@ namespace HttpFilters {
 namespace CacheCustom {
 
 class CacheCustomFilter : public Http::PassThroughFilter,
-                          public Http::DownstreamWatermarkCallbacks,
                           public Logger::Loggable<Logger::Id::filter> {
 public:
   CacheCustomFilter(CacheConfigSharedPtr config, CacheManagerSharedPtr cache_manager);
@@ -28,17 +27,11 @@ public:
 
   // Http::StreamFilterBase
   void onDestroy() override;
-
-  // Http::DownstreamWatermarkCallbacks
-  void onAboveWriteBufferHighWatermark() override;
-  void onBelowWriteBufferLowWatermark() override;
-
-  void setBackpressure(bool back_pressure);
+  void decodeComplete() override;
 
 private:
   std::string extractHost(const Http::RequestHeaderMap& headers);
   std::string generateCacheKey(const Http::RequestHeaderMap& headers);
-  void sendCachedResponse(const CacheEntry& entry);
   void cacheResponse();
 
   CacheConfigSharedPtr config_;
@@ -52,7 +45,11 @@ private:
   bool should_cache_{false};
   bool is_leader_{false};
   bool is_follower_{false};
-  bool back_pressure_{false};
+
+  // For sending cache
+  bool has_cached_response_{false};
+  Http::ResponseHeaderMapPtr cached_response_headers_;
+  Buffer::OwnedImpl cached_response_body_;
 };
 
 } // namespace CacheCustom
