@@ -14,25 +14,31 @@ namespace CacheCustom {
 
 class CacheCustomFilter;
 
-struct CacheEntry {
-  std::string response_body;
-  uint64_t status_code;
-  std::shared_ptr<Http::ResponseHeaderMap> headers;
+enum class EntryStatus { InFlight, Completed };
+
+struct UnifiedCacheEntry {
+  EntryStatus status = EntryStatus::InFlight;
+
+  // Cached
+  Http::ResponseHeaderMapPtr response_headers;
+  std::vector<std::shared_ptr<Buffer::Instance>> chunks;
+
+  // In flight
+  bool is_complete = false;
+  std::weak_ptr<CacheCustomFilter> leader_filter;
+  std::vector<std::weak_ptr<CacheCustomFilter>> followers;
 };
 
-struct InFlightRequestState {
-  CacheCustomFilter* leader_filter;
-  std::vector<CacheCustomFilter*> followers;
-  uint32_t high_watermark_count = 0;
+enum class RegistrationStatus { Leading, Following };
+
+struct RegistrationResult {
+  RegistrationStatus status;
+  UnifiedCacheEntry* cache_entry;
 };
 
-struct BroadcastMessage {
-  enum class Type { Headers, Data };
-
-  Type type;
-  Http::ResponseHeaderMapPtr headers;     // For headers messages
-  std::shared_ptr<Buffer::Instance> data; // For data messages
-  bool end_stream;
+struct ReadStatus {
+  size_t last_read_chunk = 0;
+  bool read_headers = false;
 };
 
 } // namespace CacheCustom

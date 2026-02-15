@@ -17,29 +17,32 @@ class CacheManager : public Logger::Loggable<Logger::Id::filter> {
 public:
   CacheManager(uint32_t max_entries_per_host, uint32_t max_entry_size);
 
-  absl::optional<CacheEntry> get(const std::string& host, const std::string& key);
-  void put(const std::string& host, const std::string& key, CacheEntry entry);
-
-  bool isInFlight(const std::string& host, const std::string& key);
-  void registerLeader(const std::string& host, const std::string& key,
-                      CacheCustomFilter* leader_filter);
-  void registerFollower(const std::string& host, const std::string& key,
-                        CacheCustomFilter* follower_filter);
-
-  void broadcastData(const std::string& host, const std::string& key, Buffer::Instance& data,
-                     bool end_stream);
-  void broadcastHeaders(const std::string& host, const std::string& key,
-                        Http::ResponseHeaderMap& headers, bool end_stream);
+  absl::optional<UnifiedCacheEntry> get(const std::string& host, const std::string& key);
+  void put(const std::string& host, const std::string& key, UnifiedCacheEntry entry);
 
   void unregisterFollower(const std::string& host, const std::string& key,
-                          CacheCustomFilter* follower_filter);
+                          std::weak_ptr<CacheCustomFilter> follower);
   void notifyCompletion(const std::string& host, const std::string& key);
-  void updateWatermark(const std::string& host, const std::string& key, bool high_watermark);
+
+  RegistrationResult joinOrStartInFlight(const std::string& host, const std::string& key,
+                                         std::weak_ptr<CacheCustomFilter> filter);
+  void publishHeaders(const std::string& host, const std::string& key,
+                      Http::ResponseHeaderMap& headers, bool end_stream);
+  void publishDataChunk(const std::string& host, const std::string& key, Buffer::Instance& data,
+                        bool end_stream);
+  Http::ResponseHeaderMapPtr getHeaders(const std::string& host, const std::string& key,
+                                        bool& is_complete);
+  std::vector<std::shared_ptr<Buffer::Instance>> getNewChunks(const std::string& host,
+                                                              const std::string& key,
+                                                              size_t last_read_chunk,
+                                                              bool& is_complete);
 
 private:
+  void updateEntryAndNotify(const std::string& host, const std::string& key,
+                            std::function<void(UnifiedCacheEntry&)> update_logic, bool end_stream);
+
   struct HostCacheState {
-    std::unordered_map<std::string, InFlightRequestState> in_flight_requests;
-    std::unordered_map<std::string, CacheEntry> entries;
+    std::unordered_map<std::string, UnifiedCacheEntry> entries;
     std::deque<std::string> eviction_queue;
   };
 
@@ -47,7 +50,6 @@ private:
   const uint32_t max_entry_size_;
   std::unordered_map<std::string, HostCacheState> host_caches_;
 
-  // Mutex to protect all shared state
   mutable Thread::MutexBasicLockable mutex_;
 };
 

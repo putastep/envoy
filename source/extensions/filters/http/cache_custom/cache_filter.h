@@ -1,5 +1,6 @@
 #pragma once
 
+#include "common.h"
 #include "source/extensions/filters/http/common/pass_through_filter.h"
 
 #include "cache_config.h"
@@ -10,13 +11,11 @@ namespace Extensions {
 namespace HttpFilters {
 namespace CacheCustom {
 
-class CacheCustomFilter : public Http::PassThroughFilter,
+class CacheCustomFilter : public std::enable_shared_from_this<CacheCustomFilter>,
+                          public Http::PassThroughFilter,
                           public Logger::Loggable<Logger::Id::filter> {
 public:
   CacheCustomFilter(CacheConfigSharedPtr config, CacheManagerSharedPtr cache_manager);
-
-  void receiveBroadcastHeaders(Http::ResponseHeaderMapPtr headers, bool end_stream);
-  void receiveBroadcastData(std::shared_ptr<Buffer::Instance> data, bool end_stream);
 
   // Http::StreamDecoderFilter
   Http::FilterHeadersStatus decodeHeaders(Http::RequestHeaderMap& headers,
@@ -28,35 +27,21 @@ public:
                                           bool end_stream) override;
   Http::FilterDataStatus encodeData(Buffer::Instance& data, bool end_stream) override;
 
-  // Http::StreamFilterBase
-  void onDestroy() override;
-  void decodeComplete() override;
+  void onEntryUpdated();
 
 private:
   std::string extractHost(const Http::RequestHeaderMap& headers);
   std::string generateCacheKey(const Http::RequestHeaderMap& headers);
-  void cacheResponse();
+  void sendCachedHeaders();
 
   CacheConfigSharedPtr config_;
   CacheManagerSharedPtr cache_manager_;
 
   std::string host_;
   std::string cache_key_;
-  Buffer::OwnedImpl response_body_;
-  uint64_t status_code_{200};
-  Http::ResponseHeaderMapPtr response_headers_;
-  bool should_cache_{false};
-  bool is_leader_{false};
-  bool is_follower_{false};
 
-  // For sending cache
-  bool has_cached_response_{false};
-  Http::ResponseHeaderMapPtr cached_response_headers_;
-  Buffer::OwnedImpl cached_response_body_;
-
-  // For recieving broadcasted data
-  std::queue<BroadcastMessage> pending_broadcasts_;
-  bool decode_complete_{false};
+  RegistrationResult registration_result_;
+  ReadStatus read_status_;
 };
 
 } // namespace CacheCustom
