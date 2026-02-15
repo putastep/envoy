@@ -35,7 +35,12 @@ Http::FilterHeadersStatus CacheCustomFilter::decodeHeaders(Http::RequestHeaderMa
 
   // If headers are available send them to trigger encode path
   if (registration_result_.cache_entry->response_headers) {
-    encoder_callbacks_->dispatcher().post([this]() { sendCachedHeaders(); });
+    std::weak_ptr<CacheCustomFilter> weak_self = weak_from_this();
+    encoder_callbacks_->dispatcher().post([weak_self]() {
+      if (auto self = weak_self.lock()) {
+        self->sendCachedHeaders();
+      }
+    });
   }
 
   return Http::FilterHeadersStatus::StopIteration;
@@ -65,23 +70,10 @@ Http::FilterDataStatus CacheCustomFilter::encodeData(Buffer::Instance& data, boo
   // Publish data chunk if leader
   if (registration_result_.status == RegistrationStatus::Leading) {
     cache_manager_->publishDataChunk(host_, cache_key_, data, end_stream);
-  }
-
-  // Follower logic: Drain the cache into the current 'data' buffer
-  bool finished = false;
-  auto new_chunks =
-      cache_manager_->getNewChunks(host_, cache_key_, read_status_.last_read_chunk, finished);
-
-  for (auto& chunk : new_chunks) {
-    read_status_.last_read_chunk++;
-    data.move(*chunk);
-  }
-
-  if (finished) {
     return Http::FilterDataStatus::Continue;
   }
 
-  return Http::FilterDataStatus::StopIterationAndBuffer;
+  return Http::FilterDataStatus::StopIterationNoBuffer;
 }
 
 // --------
@@ -107,12 +99,35 @@ void CacheCustomFilter::sendCachedHeaders() {
 }
 
 void CacheCustomFilter::onEntryUpdated() {
-  encoder_callbacks_->dispatcher().post([this]() {
-    if (!read_status_.read_headers) {
-      sendCachedHeaders();
+  // Capture a weak pointer to 'this'
+  std::weak_ptr<CacheCustomFilter> weak_self = weak_from_this();
+
+  encoder_callbacks_->dispatcher().post([weak_self]() {
+    // Attempt to lock the weak pointer
+    auto self = weak_self.lock();
+    if (!self) {
+      // Filter has been destroyed, exit early safely
+      return;
     }
 
-    // encoder_callbacks_->continueEncoding();
+    // Now use 'self->' instead of 'this->'
+    if (!self->read_status_.read_headers) {
+      self->sendCachedHeaders();
+      return;
+    } else {
+      bool finished = false;
+      auto new_chunks = self->cache_manager_->getNewChunks(
+          self->host_, self->cache_key_, self->read_status_.last_read_chunk, finished);
+
+      for (auto& chunk : new_chunks) {
+        self->read_status_.last_read_chunk++;
+        self->encoder_callbacks_->injectEncodedDataToFilterChain(*chunk, finished);
+      }
+
+      if (finished) {
+        self->encoder_callbacks_->continueEncoding();
+      }
+    }
   });
 }
 

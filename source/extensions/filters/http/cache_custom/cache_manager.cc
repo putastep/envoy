@@ -60,8 +60,6 @@ void CacheManager::publishHeaders(const std::string& host, const std::string& ke
                                   Http::ResponseHeaderMap& headers, bool end_stream) {
   auto headers_copy = Http::createHeaderMap<Http::ResponseHeaderMapImpl>(headers);
 
-  ENVOY_LOG(debug, "New HEADERS for {} {}.", host, key);
-
   updateEntryAndNotify(
       host, key,
       [&](UnifiedCacheEntry& entry) { entry.response_headers = std::move(headers_copy); },
@@ -71,8 +69,6 @@ void CacheManager::publishHeaders(const std::string& host, const std::string& ke
 void CacheManager::publishDataChunk(const std::string& host, const std::string& key,
                                     Buffer::Instance& data, bool end_stream) {
   auto chunk = std::make_shared<Buffer::OwnedImpl>(data);
-
-  ENVOY_LOG(debug, "New DATA for {} {}.", host, key);
 
   updateEntryAndNotify(
       host, key, [&](UnifiedCacheEntry& entry) { entry.chunks.push_back(std::move(chunk)); },
