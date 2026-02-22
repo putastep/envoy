@@ -1,44 +1,71 @@
 #pragma once
 
-#include <string>
-#include <vector>
 #include <memory>
-#include "envoy/http/header_map.h"
-#include "envoy/http/filter.h"
-#include "source/common/http/header_map_impl.h"
+#include <vector>
+#include <string>
 
 namespace Envoy {
+namespace Buffer {
+class Instance;
+using InstancePtr = std::unique_ptr<Instance>;
+} // namespace Buffer
+
+namespace Http {
+class ResponseHeaderMap;
+class ResponseHeaderMapImpl;
+
+using ResponseHeaderMapPtr = std::unique_ptr<ResponseHeaderMap>;
+} // namespace Http
+
 namespace Extensions {
 namespace HttpFilters {
 namespace CacheCustom {
 
+class CacheEntryHandle;
 class CacheCustomFilter;
+class CacheCustomConfig;
+class CacheManager;
+struct CacheEntry;
 
-enum class EntryStatus { InFlight, Completed };
+using CacheHandleSharedPtr = std::shared_ptr<CacheEntryHandle>;
+using CacheConfigSharedPtr = std::shared_ptr<CacheCustomConfig>;
+using CacheManagerSharedPtr = std::shared_ptr<CacheManager>;
+using FilterWeakPtr = std::weak_ptr<CacheCustomFilter>;
+using Hostname = std::string;
+using RequestKey = std::string;
 
-struct UnifiedCacheEntry {
-  EntryStatus status = EntryStatus::InFlight;
+enum class InFlightStatus { Leading, Following };
 
-  // Cached
-  Http::ResponseHeaderMapPtr response_headers;
-  std::vector<std::shared_ptr<Buffer::Instance>> chunks;
-
-  // In flight
-  bool is_complete = false;
-  std::weak_ptr<CacheCustomFilter> leader_filter;
-  std::vector<std::weak_ptr<CacheCustomFilter>> followers;
+struct DataView {
+  const Http::ResponseHeaderMap* headers;
+  const Buffer::Instance* body;
 };
 
-enum class RegistrationStatus { Leading, Following };
-
-struct RegistrationResult {
-  RegistrationStatus status;
-  UnifiedCacheEntry* cache_entry;
+struct RequestStatus {
+  CacheHandleSharedPtr handle;
+  InFlightStatus status;
+  std::optional<DataView> cached_data;
 };
 
-struct ReadStatus {
-  size_t last_read_chunk = 0;
-  bool read_headers = false;
+// -----
+// Cache entry
+// -----
+
+struct CacheEntry {
+  struct Data {
+    Http::ResponseHeaderMapPtr headers;
+    Buffer::InstancePtr body;
+  };
+
+  struct Coalescing {
+    FilterWeakPtr leader;
+    std::vector<FilterWeakPtr> followers;
+  };
+
+  Data data;
+  Coalescing coalescing;
+
+  alignas(64) bool is_finished{false};
 };
 
 } // namespace CacheCustom

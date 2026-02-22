@@ -1,12 +1,9 @@
 #pragma once
 
+#include "common.h"
 #include <deque>
 #include <unordered_map>
 #include "source/common/common/logger.h"
-#include "source/common/buffer/buffer_impl.h"
-#include "common.h"
-
-#include "envoy/thread/thread.h"
 
 namespace Envoy {
 namespace Extensions {
@@ -15,45 +12,33 @@ namespace CacheCustom {
 
 class CacheManager : public Logger::Loggable<Logger::Id::filter> {
 public:
-  CacheManager(uint32_t max_entries_per_host, uint32_t max_entry_size);
+  CacheManager(uint32_t max_entries_per_host);
 
-  absl::optional<UnifiedCacheEntry> get(const std::string& host, const std::string& key);
-  void put(const std::string& host, const std::string& key, UnifiedCacheEntry entry);
-
-  void unregisterFollower(const std::string& host, const std::string& key,
-                          std::weak_ptr<CacheCustomFilter> follower);
-  void notifyCompletion(const std::string& host, const std::string& key);
-
-  RegistrationResult joinOrStartInFlight(const std::string& host, const std::string& key,
-                                         std::weak_ptr<CacheCustomFilter> filter);
-  void publishHeaders(const std::string& host, const std::string& key,
-                      Http::ResponseHeaderMap& headers, bool end_stream);
-  void publishDataChunk(const std::string& host, const std::string& key, Buffer::Instance& data,
-                        bool end_stream);
-  Http::ResponseHeaderMapPtr getHeaders(const std::string& host, const std::string& key,
-                                        bool& is_complete);
-  std::vector<std::shared_ptr<Buffer::Instance>> getNewChunks(const std::string& host,
-                                                              const std::string& key,
-                                                              size_t last_read_chunk,
-                                                              bool& is_complete);
+  RequestStatus joinOrStartInFlight(const Hostname& host, const RequestKey& key,
+                                    FilterWeakPtr filter);
 
 private:
-  void updateEntryAndNotify(const std::string& host, const std::string& key,
-                            std::function<void(UnifiedCacheEntry&)> update_logic, bool end_stream);
+  const uint32_t max_entries_per_host_;
 
-  struct HostCacheState {
-    std::unordered_map<std::string, UnifiedCacheEntry> entries;
-    std::deque<std::string> eviction_queue;
+  struct HostRegistry {
+    struct RingBuffer {
+      std::unordered_map<RequestKey, CacheHandleSharedPtr> records;
+      std::deque<RequestKey> eviction_order;
+    };
+
+    std::unordered_map<Hostname, RingBuffer> hosts;
   };
 
-  const uint32_t max_entries_per_host_;
-  const uint32_t max_entry_size_;
-  std::unordered_map<std::string, HostCacheState> host_caches_;
+  HostRegistry registry_;
 
-  mutable Thread::MutexBasicLockable mutex_;
+  // Total number of mutexes shared between hosts
+  static constexpr size_t NumShards = 64;
+  std::array<std::mutex, NumShards> mutexes_;
+
+  std::mutex& getMutexForHost(const Hostname& host) {
+    return mutexes_[std::hash<std::string>{}(host) % NumShards];
+  }
 };
-
-using CacheManagerSharedPtr = std::shared_ptr<CacheManager>;
 
 } // namespace CacheCustom
 } // namespace HttpFilters

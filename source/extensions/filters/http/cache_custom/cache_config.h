@@ -1,6 +1,5 @@
 #pragma once
 
-#include <memory>
 #include "envoy/extensions/filters/http/cache_custom/v3/cache.pb.h"
 
 namespace Envoy {
@@ -19,8 +18,6 @@ private:
   const uint32_t max_entries_per_host_;
   const uint32_t max_entry_size_;
 };
-
-using CacheConfigSharedPtr = std::shared_ptr<CacheCustomConfig>;
 
 } // namespace CacheCustom
 } // namespace HttpFilters

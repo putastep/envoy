@@ -15,12 +15,14 @@ envoy_cc_library(
         "cache_filter.cc",
         "cache_config.cc",
         "cache_manager.cc",
+        "cache_entry_handle.cc",
     ],
     hdrs = [
         "cache_filter.h",
         "cache_config.h",
         "cache_manager.h",
         "common.h",
+        "cache_entry_handle.h",
     ],
     deps = [
         "//envoy/http:filter_interface",

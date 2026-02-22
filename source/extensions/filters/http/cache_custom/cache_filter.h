@@ -1,10 +1,8 @@
 #pragma once
 
-#include "common.h"
 #include "source/extensions/filters/http/common/pass_through_filter.h"
-
-#include "cache_config.h"
-#include "cache_manager.h"
+#include "common.h"
+#include <memory>
 
 namespace Envoy {
 namespace Extensions {
@@ -15,7 +13,7 @@ class CacheCustomFilter : public std::enable_shared_from_this<CacheCustomFilter>
                           public Http::PassThroughFilter,
                           public Logger::Loggable<Logger::Id::filter> {
 public:
-  CacheCustomFilter(CacheConfigSharedPtr config, CacheManagerSharedPtr cache_manager);
+  CacheCustomFilter(CacheConfigSharedPtr config, CacheManagerSharedPtr manager);
 
   // Http::StreamDecoderFilter
   Http::FilterHeadersStatus decodeHeaders(Http::RequestHeaderMap& headers,
@@ -27,21 +25,29 @@ public:
                                           bool end_stream) override;
   Http::FilterDataStatus encodeData(Buffer::Instance& data, bool end_stream) override;
 
-  void onEntryUpdated();
+  void recieveHeaders(std::shared_ptr<const Http::ResponseHeaderMap> headers, bool end_stream);
+  void recieveBody(std::shared_ptr<const Envoy::Buffer::Instance> body, bool end_stream);
 
 private:
-  std::string extractHost(const Http::RequestHeaderMap& headers);
-  std::string generateCacheKey(const Http::RequestHeaderMap& headers);
+  struct ReadStatus {
+    size_t index = 0;
+    bool headers = false;
+  };
+
+  Hostname extractHost(const Http::RequestHeaderMap& headers);
+  RequestKey generateCacheKey(const Http::RequestHeaderMap& headers);
   void sendCachedHeaders();
+  void sendCachedBody();
+  void sendCachedData();
 
   CacheConfigSharedPtr config_;
-  CacheManagerSharedPtr cache_manager_;
+  CacheManagerSharedPtr manager_;
 
-  std::string host_;
-  std::string cache_key_;
+  Hostname host_;
+  RequestKey key_;
 
-  RegistrationResult registration_result_;
-  ReadStatus read_status_;
+  RequestStatus request_;
+  ReadStatus read_;
 };
 
 } // namespace CacheCustom
