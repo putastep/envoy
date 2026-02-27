@@ -27,17 +27,44 @@ Http::FilterHeadersStatus CacheCustomFilter::decodeHeaders(Http::RequestHeaderMa
   host_ = extractHost(headers);
   key_ = generateCacheKey(headers);
 
-  // Get registration result from cache manager
-  request_ = manager_->joinOrStartInFlight(host_, key_, weak_from_this());
+  // Get a handle and start request
+  handle_ = manager_->getHandle(host_, key_);
+
+  // Join a request
+  status_ = handle_->joinOrStartRequest(
+      [weak_self = weak_from_this()](const CacheNotification& notification) {
+        auto self = weak_self.lock();
+        if (!self || !self->decoder_callbacks_) {
+          return;
+        }
+
+        self->decoder_callbacks_->dispatcher().post([weak_self, notification]() {
+          auto self = weak_self.lock();
+          if (!self || !self->decoder_callbacks_) {
+            return;
+          }
+
+          switch (notification.type) {
+          case CacheEvent::Headers: {
+            ENVOY_LOG(debug, "{} sending revieved HEADERS.", static_cast<void*>(self.get()));
+            self->sendShaderHeaders(notification.headers, notification.end_stream);
+            break;
+          }
+          case CacheEvent::Body: {
+            ENVOY_LOG(debug, "{} sending recieved BODY.", static_cast<void*>(self.get()));
+            self->sendSharedBody(notification.body, notification.end_stream);
+            break;
+          }
+          }
+        });
+      });
+
+  ENVOY_LOG(debug, "{} is now {} for key {} {}.", static_cast<void*>(this),
+            static_cast<int>(status_), host_, key_);
 
   // Let request go through if leaders
-  if (request_.status == InFlightStatus::Leading) {
+  if (status_ == InFlightStatus::Leading) {
     return Http::FilterHeadersStatus::Continue;
-  }
-
-  // Send cached data
-  if (request_.cached_data && request_.cached_data->headers) {
-    sendCachedData();
   }
 
   return Http::FilterHeadersStatus::StopIteration;
@@ -54,8 +81,8 @@ Http::FilterDataStatus CacheCustomFilter::decodeData(Buffer::Instance&, bool) {
 Http::FilterHeadersStatus CacheCustomFilter::encodeHeaders(Http::ResponseHeaderMap& headers,
                                                            bool end_stream) {
   // Publish headers if leader
-  if (request_.status == InFlightStatus::Leading) {
-    request_.handle->setHeaders(headers, end_stream);
+  if (status_ == InFlightStatus::Leading) {
+    handle_->setHeaders(headers, end_stream);
   }
 
   return Http::FilterHeadersStatus::Continue;
@@ -63,51 +90,35 @@ Http::FilterHeadersStatus CacheCustomFilter::encodeHeaders(Http::ResponseHeaderM
 
 Http::FilterDataStatus CacheCustomFilter::encodeData(Buffer::Instance& data, bool end_stream) {
   // Publish data chunk if leader
-  if (request_.status == InFlightStatus::Leading) {
-    request_.handle->appendChunk(data, end_stream);
+  if (status_ == InFlightStatus::Leading) {
+    handle_->appendChunk(data, end_stream);
   }
 
   return Http::FilterDataStatus::Continue;
 }
 
-void CacheCustomFilter::recieveHeaders(std::shared_ptr<const Http::ResponseHeaderMap> headers,
-                                       bool end_stream) {
-  std::weak_ptr<CacheCustomFilter> weak_self = weak_from_this();
-  encoder_callbacks_->dispatcher().post([weak_self, headers, end_stream]() {
-    auto self = weak_self.lock();
+// --------
+// CACHED PATH
+// --------
 
-    if (!self) {
-      return;
-    }
+void CacheCustomFilter::sendShaderHeaders(SharedHeaders headers, bool end_stream) {
+  auto headers_copy = Http::ResponseHeaderMapImpl::create();
 
-    ENVOY_LOG(debug, "{} sending recieved HEADERS.", static_cast<void*>(self.get()));
-
-    auto headers_copy = Http::ResponseHeaderMapImpl::create();
-    Http::HeaderMapImpl::copyFrom(*headers_copy, *headers);
-
-    self->decoder_callbacks_->encodeHeaders(std::move(headers_copy), end_stream, "cache_hit");
-    self->read_.headers = true;
-  });
+  for (const auto& [name, value] : *headers) {
+    headers_copy->addCopy(Http::LowerCaseString(name), value);
+  }
+  decoder_callbacks_->encodeHeaders(std::move(headers_copy), end_stream, "cache_hit");
+  read_.headers = true;
 }
 
-void CacheCustomFilter::recieveBody(std::shared_ptr<const Envoy::Buffer::Instance> body,
-                                    bool end_stream) {
-  std::weak_ptr<CacheCustomFilter> weak_self = weak_from_this();
-  encoder_callbacks_->dispatcher().post([weak_self, body, end_stream]() {
-    auto self = weak_self.lock();
+void CacheCustomFilter::sendSharedBody(SharedBuffer body, bool end_stream) {
+  Buffer::OwnedImpl buffer;
 
-    if (!self) {
-      return;
-    }
-
-    ENVOY_LOG(debug, "{} sending recieved BODY.", static_cast<void*>(self.get()));
-
-    Buffer::OwnedImpl body_copy;
-    body_copy.add(*body);
-
-    self->encoder_callbacks_->injectEncodedDataToFilterChain(body_copy, end_stream);
-    self->read_.index += body_copy.length();
-  });
+  auto* fragment = new CacheBodyFragment(body);
+  buffer.addBufferFragment(*fragment);
+  const size_t len = buffer.length();
+  decoder_callbacks_->encodeData(buffer, end_stream);
+  read_.index += len;
 }
 
 // --------
@@ -120,52 +131,6 @@ std::string CacheCustomFilter::generateCacheKey(const Http::RequestHeaderMap& he
 
 std::string CacheCustomFilter::extractHost(const Http::RequestHeaderMap& headers) {
   return std::string(headers.getHostValue());
-}
-
-void CacheCustomFilter::sendCachedHeaders() {
-  ENVOY_LOG(debug, "{} sending cached HEADERS.", static_cast<void*>(this));
-  auto headers = Http::ResponseHeaderMapImpl::create();
-  Http::HeaderMapImpl::copyFrom(*headers, *request_.cached_data->headers);
-
-  decoder_callbacks_->encodeHeaders(std::move(headers), false, "cache_hit");
-  read_.headers = true;
-}
-
-void CacheCustomFilter::sendCachedBody() {
-  ENVOY_LOG(debug, "{} sending cached BODY.", static_cast<void*>(this));
-  Buffer::OwnedImpl body;
-  body.add(*request_.cached_data->body);
-
-  encoder_callbacks_->injectEncodedDataToFilterChain(body, true);
-  read_.index += body.length();
-}
-
-void CacheCustomFilter::sendCachedData() {
-  ENVOY_LOG(debug, "{} sending cached DATA.", static_cast<void*>(this));
-  std::weak_ptr<CacheCustomFilter> weak_self = weak_from_this();
-
-  encoder_callbacks_->dispatcher().post([weak_self]() {
-    auto self = weak_self.lock();
-    auto handle = self->request_.handle;
-    if (!self || !handle) {
-      return;
-    }
-
-    // Send cached headers
-    self->sendCachedHeaders();
-
-    // Send cached body
-    self->sendCachedBody();
-
-    // Send ending data
-    if (handle->isComplete() && self->read_.index == handle->totalBytes()) {
-      Buffer::OwnedImpl empty_buffer;
-
-      ENVOY_LOG(debug, "{} sending ENDING.", static_cast<void*>(self.get()));
-      self->encoder_callbacks_->injectEncodedDataToFilterChain(empty_buffer, true);
-      // self->encoder_callbacks_->continueEncoding();
-    }
-  });
 }
 
 } // namespace CacheCustom

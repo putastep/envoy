@@ -5,10 +5,11 @@
 #include "source/common/buffer/buffer_impl.h"
 #include "source/common/http/header_map_impl.h"
 #include "cache_filter.h"
-#
+
 #include <cstddef>
 #include <memory>
 
+#include <optional>
 #include <utility>
 
 namespace Envoy {
@@ -18,77 +19,86 @@ namespace CacheCustom {
 
 // --- Leader ---
 void CacheEntryHandle::appendChunk(const Buffer::Instance& chunk, bool end_stream) {
-  auto shared_chunk = std::make_shared<Envoy::Buffer::OwnedImpl>();
-  shared_chunk->add(chunk);
-
-  std::vector<FilterWeakPtr> followers_to_notify;
+  std::vector<std::pair<CacheCallback, CacheNotification>> to_notify;
   {
     std::lock_guard<std::mutex> lock(mutex_);
 
-    if (!entry_.data.body) {
-      entry_.data.body = std::make_unique<Envoy::Buffer::OwnedImpl>();
-    }
-
-    entry_.data.body->add(chunk);
+    // Create a copy
+    auto segment = std::make_shared<std::vector<uint8_t>>(chunk.length());
+    chunk.copyOut(0, chunk.length(), segment->data());
+    entry_.data.chunks.push_back(std::move(segment));
 
     if (end_stream) {
       entry_.is_finished = true;
     }
 
-    followers_to_notify = entry_.coalescing.followers;
+    auto notification =
+        CacheNotification{CacheEvent::Body, nullptr, entry_.data.chunks.back(), end_stream};
+    for (auto& cb : entry_.coalescing.followers) {
+      to_notify.emplace_back(cb, notification);
+    }
   }
 
-  for (auto& follower_ptr : followers_to_notify) {
-    if (auto follower = follower_ptr.lock()) {
-      follower->recieveBody(shared_chunk, end_stream);
-    }
+  for (auto& [cb, notification] : to_notify) {
+    cb(notification);
   }
 }
 
 void CacheEntryHandle::setHeaders(const Http::ResponseHeaderMap& headers, bool end_stream) {
-  auto shared_header = Http::ResponseHeaderMapImpl::create();
-  Http::HeaderMapImpl::copyFrom(*shared_header, headers);
-  std::shared_ptr<Http::ResponseHeaderMap> shared_header_ptr = std::move(shared_header);
-
-  std::vector<FilterWeakPtr> followers_to_notify;
+  std::vector<std::pair<CacheCallback, CacheNotification>> to_notify;
   {
     std::lock_guard<std::mutex> lock(mutex_);
 
-    entry_.data.headers = Http::ResponseHeaderMapImpl::create();
-    Http::HeaderMapImpl::copyFrom(*entry_.data.headers, headers);
+    entry_.data.headers = std::make_shared<std::vector<PackedHeader>>();
+
+    // Create a copy
+    headers.iterate([this](const Http::HeaderEntry& header) {
+      entry_.data.headers->emplace_back(std::string(header.key().getStringView()),
+                                        std::string(header.value().getStringView()));
+      return Http::HeaderMap::Iterate::Continue;
+    });
 
     if (end_stream) {
       entry_.is_finished = true;
     }
 
-    followers_to_notify = entry_.coalescing.followers;
-  }
-
-  for (auto& follower_ptr : followers_to_notify) {
-    if (auto follower = follower_ptr.lock()) {
-      follower->recieveHeaders(shared_header_ptr, end_stream);
+    auto notification =
+        CacheNotification{CacheEvent::Headers, entry_.data.headers, nullptr, end_stream};
+    for (auto& cb : entry_.coalescing.followers) {
+      to_notify.emplace_back(cb, notification);
     }
   }
+
+  for (auto& [cb, notification] : to_notify) {
+    cb(notification);
+  }
 }
 
-// --- Follower ---
-const DataView CacheEntryHandle::data() {
-  return {entry_.data.headers.get(), entry_.data.body.get()};
-}
-
-const Http::ResponseHeaderMap& CacheEntryHandle::headers() { return *entry_.data.headers; }
-
-const Envoy::Buffer::InstancePtr& CacheEntryHandle::body() { return entry_.data.body; }
-
-// --- State ---
-size_t CacheEntryHandle::totalBytes() const {
+InFlightStatus CacheEntryHandle::joinOrStartRequest(CacheCallback callback) {
   std::lock_guard<std::mutex> lock(mutex_);
-  return entry_.data.body->length();
-}
 
-bool CacheEntryHandle::isComplete() const {
-  std::lock_guard<std::mutex> lock(mutex_);
-  return entry_.is_finished;
+  if (!entry_.coalescing.leader) {
+    entry_.coalescing.leader = true;
+    return InFlightStatus::Leading;
+  }
+
+  // Replay all data
+  if (entry_.data.headers) {
+    const bool end_stream = entry_.is_finished && entry_.data.chunks.empty();
+    callback({CacheEvent::Headers, entry_.data.headers, nullptr, end_stream});
+  }
+
+  for (size_t i = 0; i < entry_.data.chunks.size(); i++) {
+    const bool end_stream = entry_.is_finished && (i == entry_.data.chunks.size() - 1);
+    callback({CacheEvent::Body, nullptr, entry_.data.chunks[i], end_stream});
+  }
+
+  if (!entry_.is_finished) {
+    entry_.coalescing.followers.push_back(std::move(callback));
+    return InFlightStatus::Following;
+  }
+
+  return InFlightStatus::Finished;
 }
 
 } // namespace CacheCustom

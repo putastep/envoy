@@ -25,9 +25,6 @@ public:
                                           bool end_stream) override;
   Http::FilterDataStatus encodeData(Buffer::Instance& data, bool end_stream) override;
 
-  void recieveHeaders(std::shared_ptr<const Http::ResponseHeaderMap> headers, bool end_stream);
-  void recieveBody(std::shared_ptr<const Envoy::Buffer::Instance> body, bool end_stream);
-
 private:
   struct ReadStatus {
     size_t index = 0;
@@ -36,9 +33,8 @@ private:
 
   Hostname extractHost(const Http::RequestHeaderMap& headers);
   RequestKey generateCacheKey(const Http::RequestHeaderMap& headers);
-  void sendCachedHeaders();
-  void sendCachedBody();
-  void sendCachedData();
+  void sendShaderHeaders(SharedHeaders headers, bool end_stream);
+  void sendSharedBody(SharedBuffer body, bool end_stream);
 
   CacheConfigSharedPtr config_;
   CacheManagerSharedPtr manager_;
@@ -46,7 +42,8 @@ private:
   Hostname host_;
   RequestKey key_;
 
-  RequestStatus request_;
+  CacheHandleSharedPtr handle_;
+  InFlightStatus status_;
   ReadStatus read_;
 };
 

@@ -4,98 +4,110 @@ static_resources:
     address:
       socket_address:
         address: 0.0.0.0
-        port_value: 8080
-    # Configure per-connection buffer limits
-    per_connection_buffer_limit_bytes: 1048576  # 1MB per connection
-    
+        port_value: 10000
     filter_chains:
     - filters:
       - name: envoy.filters.network.http_connection_manager
         typed_config:
           "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
           stat_prefix: ingress_http
-          codec_type: AUTO
-          
-          # Stream idle timeout for testing slow clients
-          stream_idle_timeout: 300s
-          request_timeout: 300s
-          
-          # Access logging with buffer info
+          # Access log prints :authority so you can see which ring buffer handled each request
           access_log:
           - name: envoy.access_loggers.stdout
             typed_config:
               "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
               log_format:
-                text_format: |
-                  [%START_TIME%] "%REQ(:METHOD)% %REQ(X-ENVOY-ORIGINAL-PATH?:PATH)%" %RESPONSE_CODE% %BYTES_RECEIVED%rx %BYTES_SENT%tx %DURATION%ms %RESPONSE_FLAGS%
-          
+                text_format: "[%START_TIME%] host=%REQ(:AUTHORITY)% \"%REQ(:METHOD)% %REQ(X-ENVOY-ORIGINAL-PATH?:PATH)% %PROTOCOL%\" %RESPONSE_CODE% %RESPONSE_FLAGS% cache=%RESP(X-CACHE-STATUS)% upstream_ms=%DURATION%\n"
           route_config:
             name: local_route
             virtual_hosts:
-            - name: backend
+
+            # ----------------------------------------------------------------
+            # host-a  →  backend on port 8080
+            # curl -H "Host: host-a" http://localhost:10000/...
+            # Ring buffer for host-a: independent 2-entry ring buffer
+            # ----------------------------------------------------------------
+            - name: host_a
+              domains: ["host-a", "host-a:10000"]
+              routes:
+              - match:
+                  prefix: "/"
+                route:
+                  cluster: backend_a
+                  timeout: 10s
+
+            # ----------------------------------------------------------------
+            # host-b  →  backend on port 8081
+            # curl -H "Host: host-b" http://localhost:10000/...
+            # Ring buffer for host-b: independent 2-entry ring buffer
+            # ----------------------------------------------------------------
+            - name: host_b
+              domains: ["host-b", "host-b:10000"]
+              routes:
+              - match:
+                  prefix: "/"
+                route:
+                  cluster: backend_b
+                  timeout: 10s
+
+            # ----------------------------------------------------------------
+            # Default (no Host override) → backend_a / port 8080
+            # ----------------------------------------------------------------
+            - name: default
               domains: ["*"]
               routes:
               - match:
                   prefix: "/"
                 route:
-                  cluster: backend_service
-                  timeout: 300s
-          
+                  cluster: backend_a
+                  timeout: 10s
+
           http_filters:
-          # Your custom cache filter with buffer awareness
           - name: envoy.filters.http.cache_custom
             typed_config:
               "@type": type.googleapis.com/envoy.extensions.filters.http.cache_custom.v3.CacheCustom
-              max_entries_per_host: 1000
-              max_entry_size_bytes: 1048576  # 1MB - responses larger than this won't be cached
-          
+              # Each distinct :authority value gets its own ring buffer.
+              #   host-a ring: [ slot0, slot1 ]   ← completely independent
+              #   host-b ring: [ slot0, slot1 ]   ← completely independent
+              max_entries_per_host: 2
+              max_entry_size_bytes: 1024
           - name: envoy.filters.http.router
             typed_config:
               "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
 
   clusters:
-  - name: backend_service
+  # Cluster A — port 8080 — "host-a"
+  - name: backend_a
     connect_timeout: 5s
-    type: STATIC
+    type: STRICT_DNS
     lb_policy: ROUND_ROBIN
-    
-    # Cluster-level circuit breaker settings (affects buffering)
-    circuit_breakers:
-      thresholds:
-      - priority: DEFAULT
-        max_connections: 1024
-        max_pending_requests: 1024
-        max_requests: 1024
-        max_retries: 3
-    
-    # Connection buffer limits
-    per_connection_buffer_limit_bytes: 1048576  # 1MB
-    
     load_assignment:
-      cluster_name: backend_service
+      cluster_name: backend_a
       endpoints:
       - lb_endpoints:
         - endpoint:
             address:
               socket_address:
                 address: 127.0.0.1
-                port_value: 3000
+                port_value: 8080
 
-# Admin interface
+  # Cluster B — port 8081 — "host-b"
+  - name: backend_b
+    connect_timeout: 5s
+    type: STRICT_DNS
+    lb_policy: ROUND_ROBIN
+    load_assignment:
+      cluster_name: backend_b
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address:
+                address: 127.0.0.1
+                port_value: 8082
+
 admin:
   address:
     socket_address:
       address: 0.0.0.0
       port_value: 9901
-
-# Buffer-specific settings
-layered_runtime:
-  layers:
-  - name: static_layer
-    static_layer:
-      # Override default buffer limits for testing
-      envoy:
-        # Disable or adjust buffer limits (set very high for testing)
-        # Default is 1MB, we can test with different values
-        buffer_limits:
-          max_request_bytes: 10485760  # 10MB

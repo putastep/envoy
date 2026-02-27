@@ -3,6 +3,7 @@
 #include <memory>
 #include <vector>
 #include <string>
+#include "envoy/buffer/buffer.h"
 
 namespace Envoy {
 namespace Buffer {
@@ -25,41 +26,62 @@ class CacheEntryHandle;
 class CacheCustomFilter;
 class CacheCustomConfig;
 class CacheManager;
-struct CacheEntry;
+struct PackedHeader;
+struct CacheNotification;
 
 using CacheHandleSharedPtr = std::shared_ptr<CacheEntryHandle>;
 using CacheConfigSharedPtr = std::shared_ptr<CacheCustomConfig>;
 using CacheManagerSharedPtr = std::shared_ptr<CacheManager>;
+using SharedBuffer = std::shared_ptr<const std::vector<uint8_t>>;
+using SharedHeaders = std::shared_ptr<std::vector<PackedHeader>>;
+using CacheCallback = std::function<void(const CacheNotification&)>;
+
 using FilterWeakPtr = std::weak_ptr<CacheCustomFilter>;
 using Hostname = std::string;
 using RequestKey = std::string;
 
-enum class InFlightStatus { Leading, Following };
+enum class InFlightStatus { Leading, Following, Finished };
 
-struct DataView {
-  const Http::ResponseHeaderMap* headers;
-  const Buffer::Instance* body;
+struct Data {
+  SharedHeaders headers;
+  std::vector<SharedBuffer> chunks;
 };
 
-struct RequestStatus {
-  CacheHandleSharedPtr handle;
-  InFlightStatus status;
-  std::optional<DataView> cached_data;
+enum class CacheEvent { Headers, Body };
+
+struct CacheNotification {
+  CacheEvent type;
+  SharedHeaders headers; // set if type == Headers
+  SharedBuffer body;     // set if type == Body
+  bool end_stream;
+};
+
+struct PackedHeader {
+  const std::string name;
+  const std::string value;
+};
+
+class CacheBodyFragment : public Buffer::BufferFragment {
+public:
+  CacheBodyFragment(SharedBuffer data) : data_(std::move(data)) {}
+
+  const void* data() const override { return data_->data(); }
+  size_t size() const override { return data_->size(); }
+
+  // Envoy calls this when the buffer is finally drained
+  void done() override { delete this; }
+
+private:
+  const SharedBuffer data_;
 };
 
 // -----
 // Cache entry
 // -----
-
 struct CacheEntry {
-  struct Data {
-    Http::ResponseHeaderMapPtr headers;
-    Buffer::InstancePtr body;
-  };
-
   struct Coalescing {
-    FilterWeakPtr leader;
-    std::vector<FilterWeakPtr> followers;
+    bool leader;
+    std::vector<CacheCallback> followers;
   };
 
   Data data;

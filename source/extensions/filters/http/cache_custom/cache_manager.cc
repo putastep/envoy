@@ -14,31 +14,34 @@ namespace CacheCustom {
 CacheManager::CacheManager(uint32_t max_entries_per_host)
     : max_entries_per_host_(max_entries_per_host) {}
 
-RequestStatus CacheManager::joinOrStartInFlight(const Hostname& host, const RequestKey& key,
-                                                FilterWeakPtr filter) {
-  std::lock_guard<std::mutex> lock(getMutexForHost(host));
-  auto& handle_ptr = registry_.hosts[host].records[key];
+CacheHandleSharedPtr CacheManager::getHandle(const Hostname& host, const RequestKey& key) {
+  std::lock_guard<std::mutex> lock(mutex_);
 
-  if (max_entries_per_host_ < 0) {
-    return {};
-  }
+  auto& host_buffer = registry_.hosts[host];
+  auto& handle_ptr = host_buffer.records[key];
 
-  // If handler does not exists
   if (!handle_ptr) {
-    ENVOY_LOG(debug, "{} is now LEADER.", static_cast<void*>(filter.lock().get()));
-    handle_ptr = std::make_shared<CacheEntryHandle>(getMutexForHost(host));
-    handle_ptr->entry_.coalescing.leader = filter;
+    if (host_buffer.records.size() > max_entries_per_host_) {
+      evictOldest(host_buffer);
+    }
 
-    return {handle_ptr, InFlightStatus::Leading, std::nullopt};
-  };
-
-  // If request still in flight
-  if (!handle_ptr->entry_.is_finished) {
-    handle_ptr->entry_.coalescing.followers.push_back(filter);
+    handle_ptr = std::make_shared<CacheEntryHandle>();
+    host_buffer.eviction_order.push_back(key);
   }
-  ENVOY_LOG(debug, "{} is now FOLLOWER.", static_cast<void*>(filter.lock().get()));
 
-  return {handle_ptr, InFlightStatus::Following, handle_ptr->data()};
+  return handle_ptr;
+}
+
+void CacheManager::evictOldest(HostRegistry::RingBuffer& buffer) {
+  if (buffer.eviction_order.empty()) {
+    return;
+  }
+
+  const RequestKey oldest_key = buffer.eviction_order.front();
+  buffer.eviction_order.pop_front();
+
+  buffer.records.erase(oldest_key);
+  ENVOY_LOG(debug, "CACHE MANAGER: Evicted oldest key {}.", oldest_key);
 }
 
 } // namespace CacheCustom
