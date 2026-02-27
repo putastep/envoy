@@ -19,6 +19,4 @@ message CacheCustom {
   // Maximum number of entries per host in the cache.
   uint32 max_entries_per_host = 1 [(validate.rules).uint32 = {gt: 0}];
 
-  // Maximum size of each cached entry in bytes.
-  uint32 max_entry_size_bytes = 3 [(validate.rules).uint32 = {gt: 0}];
 }

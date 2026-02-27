@@ -1,16 +1,6 @@
 #include "cache_entry_handle.h"
 
-#include "common.h"
-#include "envoy/buffer/buffer.h"
-#include "source/common/buffer/buffer_impl.h"
 #include "source/common/http/header_map_impl.h"
-#include "cache_filter.h"
-
-#include <cstddef>
-#include <memory>
-
-#include <optional>
-#include <utility>
 
 namespace Envoy {
 namespace Extensions {

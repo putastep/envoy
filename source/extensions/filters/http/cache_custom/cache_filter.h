@@ -1,8 +1,7 @@
 #pragma once
 
-#include "source/extensions/filters/http/common/pass_through_filter.h"
 #include "common.h"
-#include <memory>
+#include "source/extensions/filters/http/common/pass_through_filter.h"
 
 namespace Envoy {
 namespace Extensions {

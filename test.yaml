@@ -69,8 +69,7 @@ static_resources:
               # Each distinct :authority value gets its own ring buffer.
               #   host-a ring: [ slot0, slot1 ]   ← completely independent
               #   host-b ring: [ slot0, slot1 ]   ← completely independent
-              max_entries_per_host: 2
-              max_entry_size_bytes: 1024
+              max_entries_per_host: 10
           - name: envoy.filters.http.router
             typed_config:
               "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router

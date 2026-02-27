@@ -1,8 +1,6 @@
 #include "cache_filter.h"
 
 #include "common.h"
-#include <cstddef>
-#include <utility>
 #include "cache_manager.h"
 #include "cache_entry_handle.h"
 #include "source/common/http/header_map_impl.h"

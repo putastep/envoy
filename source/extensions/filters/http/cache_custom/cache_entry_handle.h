@@ -2,6 +2,7 @@
 
 #include "common.h"
 #include "source/common/common/logger.h"
+#include "envoy/http/header_map.h"
 
 namespace Envoy {
 namespace Extensions {

@@ -7,8 +7,7 @@ namespace CacheCustom {
 
 CacheCustomConfig::CacheCustomConfig(
     const envoy::extensions::filters::http::cache_custom::v3::CacheCustom& config)
-    : max_entries_per_host_(config.max_entries_per_host()),
-      max_entry_size_(config.max_entry_size_bytes()) {}
+    : max_entries_per_host_(config.max_entries_per_host()) {}
 
 } // namespace CacheCustom
 } // namespace HttpFilters
