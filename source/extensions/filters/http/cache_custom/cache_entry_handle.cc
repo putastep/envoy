@@ -1,5 +1,6 @@
 #include "cache_entry_handle.h"
 
+#include "common.h"
 #include "source/common/http/header_map_impl.h"
 
 namespace Envoy {

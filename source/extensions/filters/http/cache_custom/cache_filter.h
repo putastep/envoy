@@ -42,7 +42,7 @@ private:
   RequestKey key_;
 
   CacheHandleSharedPtr handle_;
-  InFlightStatus status_;
+  InFlightStatus status_ = InFlightStatus::NoCache;
   ReadStatus read_;
 };
 

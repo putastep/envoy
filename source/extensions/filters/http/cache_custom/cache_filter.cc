@@ -22,6 +22,20 @@ Http::FilterHeadersStatus CacheCustomFilter::decodeHeaders(Http::RequestHeaderMa
     return Http::FilterHeadersStatus::Continue;
   }
 
+  // Check headers for authorization
+  if (!headers.get(Http::LowerCaseString("authorization")).empty()) {
+    return Http::FilterHeadersStatus::Continue;
+  }
+
+  // Check headers for cache-control
+  const auto cache_control = headers.get(Http::LowerCaseString("cache-control"));
+  if (!cache_control.empty()) {
+    const absl::string_view cc = cache_control[0]->value().getStringView();
+    if (absl::StrContains(cc, "no-store") || absl::StrContains(cc, "no-cache")) {
+      return Http::FilterHeadersStatus::Continue;
+    }
+  }
+
   host_ = extractHost(headers);
   key_ = generateCacheKey(headers);
 

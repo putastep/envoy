@@ -27,7 +27,7 @@ using CacheManagerSharedPtr = std::shared_ptr<CacheManager>;
 using Hostname = std::string;
 using RequestKey = std::string;
 
-enum class InFlightStatus { Leading, Following, Finished };
+enum class InFlightStatus { Leading, Following, Finished, NoCache };
 enum class CacheEvent { Headers, Body };
 
 struct Data {
